@@ -1,0 +1,8 @@
+dist
+node_modules
+
+# Local agent and editor notes
+.agents/
+AGENTS.md
+CLAUDE.md
+.vscode/

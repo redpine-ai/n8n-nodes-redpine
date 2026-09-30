@@ -1,0 +1,62 @@
+{
+  "name": "@redpine-ai/n8n-nodes-redpine",
+  "version": "0.1.0",
+  "description": "n8n node for Redpine: search licensed publisher collections and open-access research as cited full text",
+  "license": "MIT",
+  "homepage": "https://github.com/redpine-ai/n8n-nodes-redpine#readme",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "redpine",
+    "research",
+    "search",
+    "full text"
+  ],
+  "author": {
+    "name": "Redpine Technology AB",
+    "email": "hello@redpine.ai",
+    "url": "https://redpine.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redpine-ai/n8n-nodes-redpine.git"
+  },
+  "scripts": {
+    "build": "n8n-node build",
+    "build:watch": "tsc --watch",
+    "dev": "n8n-node dev",
+    "lint": "n8n-node lint",
+    "lint:fix": "n8n-node lint --fix",
+    "release": "n8n-node release",
+    "prepublishOnly": "n8n-node prerelease",
+    "test": "n8n-node build && node --test test/select.test.mjs test/node.test.mjs"
+  },
+  "files": [
+    "dist",
+    "!dist/tsconfig.tsbuildinfo",
+    "!dist/**/*.map"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "strict": true,
+    "credentials": [
+      "dist/credentials/RedpineApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Redpine/Redpine.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@n8n/node-cli": "^0.50.3",
+    "eslint": "9.32.0",
+    "prettier": "3.6.2",
+    "release-it": "^21.1.0",
+    "typescript": "5.9.2"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

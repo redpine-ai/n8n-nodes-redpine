@@ -21,9 +21,9 @@ export interface Selection {
 	skipped: Array<{ id: string; reason: SkipReason }>;
 	/** Sum of the quoted costs of `toUnlock` (new purchases), in microdollars. */
 	quotedMicros: number;
-	/** Sum of the quoted costs of rows that arrived already unlocked. */
+	/** Sum of the quoted costs of every row that arrived already unlocked, delivered or not. */
 	priorMicros: number;
-	/** True when an already-unlocked row had no quoted cost, so priorMicros is a floor. */
+	/** True when an already-unlocked row had no usable quote; then nothing is bought. */
 	priorUnknown: boolean;
 }
 
@@ -58,8 +58,18 @@ export function formatMicros(micros: number): string {
 	return `${whole}.${frac}`;
 }
 
+/** A row's quote in microdollars, or null when it is missing or unparseable. */
+function quoteMicros(row: PreviewRow): number | null {
+	if (row.cost === null || row.cost === undefined) return null;
+	try {
+		return parseUsdToMicros(row.cost, true);
+	} catch {
+		return null;
+	}
+}
+
 /**
- * Walk the preview in relevance order and pick what to deliver.
+ * Pick what to deliver and what to buy.
  *
  * Every row counted against the cap costs its quote plus a one-microdollar
  * rounding allowance. The server charges each collection's rows as one sum
@@ -69,23 +79,25 @@ export function formatMicros(micros: number): string {
  * a fraction of a microdollar, and three of them can round up to one, so the
  * allowance applies to $0 quotes too.
  *
- * - A locked row with a known quote is bought while the running total stays
- *   within the budget. A row that would overshoot is skipped and the walk
- *   continues, so a cheaper, lower-ranked row can still fit.
- * - A locked row with no quote is skipped: null means unknown, not free.
- * - A row that is already unlocked is delivered and counted against both
- *   maxResults and the budget. A fresh preview has no such rows. They appear
- *   when an idempotent retry replays the same queryId, and then they are the
- *   rows the earlier attempt of this run bought. Counting them the same way
- *   that attempt did reproduces its decisions exactly, so the retry selects
- *   the same ids and buys nothing new. An already-unlocked row without a
- *   quote is treated as having spent the whole remaining budget.
+ * Rows that arrive already unlocked were bought earlier under this queryId:
+ * on an idempotent retry, by the failed attempt of this run. All of them are
+ * charged to the budget first, whatever their rank and whatever maxResults
+ * is, because they were paid for whether or not they are delivered now. If
+ * any of them has no usable quote, the prior spend is unknown and nothing is
+ * bought.
  *
- * Guarantee: sum(quoted cost + 1 microdollar) over the rows counted is at
- * most maxCostMicros, except when rows that arrived already unlocked exceed
- * it on their own, and the server's charge for the rows counted is at most
- * that sum. At a budget of 0 nothing is bought; only rows already unlocked
- * under this queryId are delivered.
+ * Then, in relevance order, up to maxResults rows are kept:
+ * - an already-unlocked row is delivered;
+ * - a locked row with a known quote is bought if it fits in what is left of
+ *   the budget; one that does not fit is skipped and the walk continues, so a
+ *   cheaper, lower-ranked row can still fit;
+ * - a locked row with no usable quote is skipped: null means unknown, not free.
+ *
+ * Guarantee: when anything is bought, the prior rows' quotes plus the new
+ * rows' quotes, each plus one microdollar, total at most maxCostMicros, and
+ * the server's charge for those rows is at most that total. At a budget of 0
+ * nothing is bought; only rows already unlocked under this queryId are
+ * delivered.
  */
 export function selectWithinBudget(
 	rows: PreviewRow[],
@@ -101,30 +113,30 @@ export function selectWithinBudget(
 		priorUnknown: false,
 	};
 	let committed = 0;
-	let exhausted = false;
+	for (const row of rows) {
+		if (row.locked) continue;
+		const cost = quoteMicros(row);
+		if (cost === null) selection.priorUnknown = true;
+		else {
+			selection.priorMicros += cost;
+			committed += cost + 1;
+		}
+	}
 	for (const row of rows) {
 		if (selection.keep.length >= maxResults) {
 			selection.skipped.push({ id: row.id, reason: 'maxResults' });
 			continue;
 		}
-		const cost =
-			row.cost === null || row.cost === undefined ? null : parseUsdToMicros(row.cost, true);
 		if (!row.locked) {
 			selection.keep.push(row.id);
-			if (cost === null) {
-				selection.priorUnknown = true;
-				exhausted = true;
-			} else {
-				selection.priorMicros += cost;
-				committed += cost + 1;
-			}
 			continue;
 		}
+		const cost = quoteMicros(row);
 		if (cost === null) {
 			selection.skipped.push({ id: row.id, reason: 'unknownCost' });
 			continue;
 		}
-		if (exhausted || committed + cost + 1 > maxCostMicros) {
+		if (selection.priorUnknown || committed + cost + 1 > maxCostMicros) {
 			selection.skipped.push({ id: row.id, reason: 'overBudget' });
 			continue;
 		}

@@ -173,3 +173,47 @@ test('property: an idempotent replay selects the same ids and buys nothing new',
 		assert.deepEqual(second.keep, first.keep, `case ${t}`);
 	}
 });
+
+test('Astra case: prior spend is charged before any purchase, whatever its rank', () => {
+	// A=$0.60 ranks above B=$0.40. Attempt 1 at $0.50 bought B.
+	const first = selectWithinBudget([row('A', '0.600000'), row('B', '0.400000')], 2, usd('0.5'));
+	assert.deepEqual(first.toUnlock, ['B']);
+	// Attempt 2 at $0.70 and Max Results 1: buying A would total $1.00.
+	const second = selectWithinBudget(
+		[row('A', '0.600000'), row('B', '0.400000', false)],
+		1,
+		usd('0.7'),
+	);
+	assert.deepEqual(second.toUnlock, []);
+	assert.deepEqual(second.keep, ['B']);
+	assert.equal(second.priorMicros, 400_000);
+});
+
+test('an unlocked row with no usable quote ranked after a selectable row: nothing bought', () => {
+	for (const cost of [null, undefined, 'abc', '']) {
+		const sel = selectWithinBudget([row('a', '0.100000'), row('b', cost, false)], 10, usd('100'));
+		assert.deepEqual(sel.toUnlock, [], String(cost));
+		assert.deepEqual(sel.keep, ['b']);
+		assert.equal(sel.priorUnknown, true);
+	}
+});
+
+test('prior spend includes unlocked rows that are not delivered', () => {
+	const rows = [row('a', '0.100000'), row('b', '0.200000', false), row('c', '0.300000', false)];
+	const sel = selectWithinBudget(rows, 1, usd('1'));
+	assert.equal(sel.priorMicros, 500_000);
+	assert.deepEqual(sel.toUnlock, ['a']);
+	assert.deepEqual(
+		sel.skipped.map((s) => s.reason),
+		['maxResults', 'maxResults'],
+	);
+	// With $0.60 left after prior spend counted, a $0.6 row does not fit.
+	const tight = selectWithinBudget([row('x', '0.600000'), ...rows.slice(1)], 1, usd('1.1'));
+	assert.deepEqual(tight.toUnlock, []);
+});
+
+test('a locked row with an unparseable quote is skipped, not fatal', () => {
+	const sel = selectWithinBudget([row('bad', '1.2.3'), row('ok', '0.1')], 10, usd('1'));
+	assert.deepEqual(sel.skipped, [{ id: 'bad', reason: 'unknownCost' }]);
+	assert.deepEqual(sel.toUnlock, ['ok']);
+});

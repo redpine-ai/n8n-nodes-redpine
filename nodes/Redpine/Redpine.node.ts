@@ -34,6 +34,7 @@ async function redpineRequest(
 	body?: IDataObject,
 	qs?: IDataObject,
 	headers?: IDataObject,
+	returnFullResponse = false,
 ) {
 	if (path === '/unlock') {
 		const ids = body?.resultIds;
@@ -55,6 +56,7 @@ async function redpineRequest(
 		qs,
 		headers,
 		json: true,
+		returnFullResponse,
 	});
 }
 
@@ -71,20 +73,50 @@ function fingerprint(text: string): string {
 	return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0');
 }
 
-/**
- * Idempotency key for the Search and Unlock preview. Retry on Fail reruns the
- * node inside the same execution with the same execution id and node id
- * (n8n-core WorkflowExecute retry loop; the AI tool path retries in
- * get-input-connection-data), so a retry replays the first attempt's queryId
- * and its unlock ledger instead of starting a new preview and buying again.
- *
- * The body fingerprint keeps distinct searches apart where run index cannot:
- * an AI Agent calling this tool twice, or a loop, reuses execution, node and
- * item index, and the tool path bumps its run index on every retry.
- */
-function idempotencyKey(executionId: string, nodeId: string, itemIndex: number, body: IDataObject) {
-	return `n8n:${executionId}:${nodeId}:${itemIndex}:${fingerprint(JSON.stringify(body))}`;
+/** JSON with object keys sorted at every level, so key order never changes it. */
+function canonicalJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+	if (value !== null && typeof value === 'object') {
+		const entries = Object.keys(value)
+			.sort()
+			.filter((key) => (value as IDataObject)[key] !== undefined)
+			.map((key) => `${JSON.stringify(key)}:${canonicalJson((value as IDataObject)[key])}`);
+		return `{${entries.join(',')}}`;
+	}
+	return JSON.stringify(value) ?? 'null';
 }
+
+/**
+ * Idempotency key for the Search and Unlock preview: the same on every Retry
+ * on Fail attempt of one item, different for anything else, so a retry after
+ * a lost unlock response replays the failed attempt's queryId and ledger.
+ *
+ * Regular node: n8n-core's WorkflowExecute computes runIndex once per node run
+ * (`runIndex = this.computeRunIndex(executionData)`, which is the node's
+ * count of finished runs) and its Retry on Fail loop reruns runNode with that
+ * same runIndex, execution and node. A loop iteration is a new run with a new
+ * runIndex. So execution, node, item and run index identify one attempt
+ * series, and the body is left out: an expression such as $now re-evaluates
+ * on retry, and a changed body must not mint a new key.
+ *
+ * AI tool: n8n-core's tool invocation (get-input-connection-data) does
+ * `const localRunIndex = runIndex++` inside its retry loop, so run index
+ * changes per retry and cannot be used. The tool's parameters come from the
+ * model's arguments, so a canonical fingerprint of the body tells distinct
+ * calls apart instead.
+ */
+function idempotencyKey(
+	executionId: string,
+	nodeId: string,
+	itemIndex: number,
+	discriminator: number | IDataObject,
+) {
+	const last =
+		typeof discriminator === 'number' ? discriminator : fingerprint(canonicalJson(discriminator));
+	return `n8n:${executionId}:${nodeId}:${itemIndex}:${last}`;
+}
+
+const RETRY_PROTECTED = new Set(['created', 'replayed']);
 
 /**
  * The auto-generated AI tool variant of this node has the type
@@ -490,28 +522,60 @@ export class Redpine implements INodeType {
 						body.limit = options.resultCount ?? Math.max(10, maxResults);
 
 						const executionId = this.getExecutionId();
+						const node = this.getNode();
+						const discriminator = isToolCall(node)
+							? body
+							: this.getWorkflowDataProxy(i).$thisRunIndex;
 						const headers = executionId
-							? { 'Idempotency-Key': idempotencyKey(executionId, this.getNode().id, i, body) }
+							? { 'Idempotency-Key': idempotencyKey(executionId, node.id, i, discriminator) }
 							: undefined;
-						const preview = (await redpineRequest.call(
+						const full = (await redpineRequest.call(
 							this,
 							'POST',
 							'/preview',
 							body,
 							undefined,
 							headers,
-						)) as SearchResponse;
+							true,
+						)) as { body: SearchResponse; headers?: IDataObject };
+						const preview = full.body;
 						const selection = selectWithinBudget(preview.results, maxResults, maxCostMicros);
 
-						// Skip the unlock call when every kept result is already unlocked. On an
-						// idempotent retry those are the rows the failed attempt already bought.
 						let response = preview;
 						if (selection.toUnlock.length > 0) {
+							// Buy only when the API honoured the key. Without that, a retry after a
+							// lost unlock response would preview afresh and buy again.
+							const header = Object.entries(full.headers ?? {}).find(
+								([name]) => name.toLowerCase() === 'idempotency-status',
+							);
+							const status = String(header?.[1] ?? '').toLowerCase();
+							if (!RETRY_PROTECTED.has(status)) {
+								throw new NodeOperationError(
+									node,
+									'The Redpine API has no retry protection for this search yet, so no purchase was made',
+									{
+										itemIndex: i,
+										description:
+											'Search and Unlock buys only when the API confirms the Idempotency-Key (Idempotency-Status: created or replayed). Use Preview and Unlock instead, or try again later.',
+									},
+								);
+							}
 							response = (await redpineRequest.call(this, 'POST', '/unlock', {
 								queryId: preview.queryId,
 								resultIds: selection.toUnlock,
 								includeFigures: includeFigures === true,
 							})) as SearchResponse;
+						} else if (includeFigures === true && selection.keep.length > 0) {
+							// Every selected row was already unlocked (a replay), so no unlock call
+							// carries includeFigures. Fetch the figures for them, free.
+							const withFigures = (await redpineRequest.call(
+								this,
+								'GET',
+								`/results/${encodeURIComponent(preview.queryId)}`,
+								undefined,
+								{ includeFigures: true },
+							)) as SearchResponse;
+							response = { ...preview, results: withFigures.results };
 						}
 
 						output = toItems(response, new Set(selection.keep), {

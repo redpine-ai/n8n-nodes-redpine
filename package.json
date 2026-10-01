@@ -1,6 +1,6 @@
 {
   "name": "@redpine-ai/n8n-nodes-redpine",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "n8n node for Redpine: search licensed publisher collections and open-access research as cited full text",
   "license": "MIT",
   "homepage": "https://github.com/redpine-ai/n8n-nodes-redpine#readme",

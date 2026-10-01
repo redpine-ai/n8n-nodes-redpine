@@ -68,28 +68,30 @@ The unattended path: preview, then buy the best results that fit within a cost c
 - **Max Results**: the most results to deliver.
 - **Max Cost Per Run (USD)**: the most this node may charge per input item, retries included (see below). Default 0, which buys nothing.
 
-How results are chosen, walking the preview in relevance order:
+How results are chosen:
 
-1. Locked results with a known cost are bought while the running total stays within Max Cost. A result that would go over is skipped and the walk continues, so a cheaper result further down can still fit.
-2. Locked results with an unknown (`null`) cost are skipped. Unknown does not mean free.
-3. Results that are already unlocked are delivered, and their price counts against both Max Cost and Max Results (see Retries). An already-unlocked result with an unknown price uses up the rest of the budget.
-4. The walk stops once Max Results are kept.
+1. Results that are already unlocked under this search (see Retries) were paid for earlier. All of their prices are counted against Max Cost first, whatever their rank and whether or not they are delivered. If any of them has no usable price, nothing is bought.
+2. Then, in relevance order, up to Max Results are kept. An already-unlocked result is delivered. A locked result with a known price is bought if it fits in what is left of Max Cost; one that would go over is skipped and the walk continues, so a cheaper result further down can still fit.
+3. Locked results with an unknown (`null`) price are skipped. Unknown does not mean free.
 
-The node then unlocks only the chosen locked results. If there are none, it makes no unlock call.
+The node then unlocks only the chosen locked results. If there are none, it makes no unlock call; with **Include Figures** on, it fetches the delivered results' figures from Get Results instead, which is free.
 
-Costs are added up in whole microdollars, never floating point. Each result counted also reserves one microdollar, including results priced at $0.000000: the API charges each collection's results as one rounded sum rather than the sum of the listed prices, and the two differ by less than one microdollar per result. What is guaranteed: for the results this node buys, the API's charge is at most the listed prices plus one microdollar each, and that total is at most Max Cost. At a Max Cost of 0 nothing is bought.
+Costs are added up in whole microdollars, never floating point. Each result counted also reserves one microdollar, including results priced at $0.000000: the API charges each collection's results as one rounded sum rather than the sum of the listed prices, and the two differ by less than one microdollar per result. What is guaranteed: when the node buys, the prices of the results bought earlier under this search plus the results it buys now, each plus one microdollar, total at most Max Cost, and the API's charge for them is at most that total. At a Max Cost of 0 nothing is bought.
 
 #### Retries
 
-With **Retry on Fail**, a retry after an unlock whose response was lost could otherwise buy again. The node sends an `Idempotency-Key` header on the Search and Unlock preview, built from the execution id, the node id, the item index and a fingerprint of the search. A retry within the same execution sends the same key, the API returns the same `queryId` with the results the failed attempt bought already unlocked, and because those count against Max Cost the retry selects the same results and is charged nothing new.
+With **Retry on Fail**, a retry after an unlock whose response was lost could otherwise buy again. The node sends an `Idempotency-Key` header on the Search and Unlock preview. A retry of the same item sends the same key, the API returns the same `queryId` with the results the failed attempt bought already unlocked, and because those count against Max Cost the retry buys nothing it could not have bought the first time.
+
+- On the regular node the key is the execution id, node id, item index and run index. It does not depend on the search text, so a query built with an expression such as `$now` keeps its key on retry; the API then refuses the changed search instead of buying again. Each loop iteration is a new run, so it gets a new key.
+- As an AI tool, n8n changes the run index on every retry, so the key uses a fingerprint of the search instead, with object keys sorted so their order does not matter.
+
+**The node only buys when the API confirms the key**, by answering the preview with `Idempotency-Status: created` or `replayed`. If the API does not, Search and Unlock fails with an error saying no purchase was made. Preview, Get Results and Unlock are not affected.
 
 Limits:
 
 - A manual re-run of a failed execution gets a new execution id, so a new key and a new preview. It can buy up to Max Cost again.
-- The same search at the same item position, repeated within one execution (for example in a loop), reuses the first search's results and buys nothing new.
-- An API version without idempotency support ignores the header; a retry then previews afresh and can buy up to Max Cost again.
 
-Output: one item per delivered result, each with a `runSummary` object: `maxResults`, `maxCost`, `quotedCost` (sum of the prices of results bought by this run), `alreadyUnlockedCost` (sum of the prices of results that arrived already unlocked; `null` if any had no price), `costCharged` (what the API charged this run), `deliveredIds`, `unlockedIds` and `skipped` (each with a reason: `maxResults`, `unknownCost` or `overBudget`). When nothing is delivered, one item with the response fields and the `runSummary`.
+Output: one item per delivered result, each with a `runSummary` object: `maxResults`, `maxCost`, `quotedCost` (sum of the prices of results bought by this run), `alreadyUnlockedCost` (sum of the prices of all results that arrived already unlocked, delivered or not; `null` if any had no usable price), `costCharged` (what the API charged this run), `deliveredIds`, `unlockedIds` and `skipped` (each with a reason: `maxResults`, `unknownCost` or `overBudget`). When nothing is delivered, one item with the response fields and the `runSummary`.
 
 ### Get Results (free)
 

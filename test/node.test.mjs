@@ -12,7 +12,13 @@ const NODE_TYPE = '@redpine-ai/n8n-nodes-redpine.redpine';
 const TOOL_TYPE = '@redpine-ai/n8n-nodes-redpine.redpineTool';
 const row = (id, cost, locked = true) => ({ id, cost, locked });
 
-// A fake n8n execute context. `handler(path, options)` plays the API.
+// A fake n8n execute context. `handler(path, options)` plays the API and
+// returns a body, or `full(body, headers)` to set response headers. A plain
+// preview body comes with `Idempotency-Status: created` unless
+// `previewHeaders` says otherwise.
+const FULL = Symbol('full');
+const full = (body, headers) => ({ [FULL]: true, body, headers });
+
 function fakeContext({
 	params,
 	rawParams = {},
@@ -21,6 +27,8 @@ function fakeContext({
 	type = NODE_TYPE,
 	continueOnFail = false,
 	executionId = 'exec-1',
+	runIndex = 0,
+	previewHeaders = { 'idempotency-status': 'created' },
 }) {
 	const calls = [];
 	const node = { id: 'node-uuid', name: 'Redpine', type, typeVersion: 1, parameters: rawParams };
@@ -30,11 +38,19 @@ function fakeContext({
 		getNodeParameter: (name, i) => (typeof params === 'function' ? params(i) : params)[name],
 		getNode: () => structuredClone(node),
 		getExecutionId: () => executionId,
+		getWorkflowDataProxy: () => ({ $thisRunIndex: runIndex }),
 		continueOnFail: () => continueOnFail,
 		helpers: {
 			async httpRequestWithAuthentication(credential, options) {
 				calls.push({ credential, ...options });
-				return handler(options.url.replace('https://api.redpine.ai/api/v1/search', ''), options);
+				const path = options.url.replace('https://api.redpine.ai/api/v1/search', '');
+				const result = await handler(path, options);
+				const response = result?.[FULL]
+					? result
+					: { body: result, headers: path === '/preview' ? previewHeaders : {} };
+				return options.returnFullResponse
+					? { body: response.body, headers: response.headers ?? {}, statusCode: 200 }
+					: response.body;
 			},
 		},
 	};
@@ -188,10 +204,10 @@ test('Search and Unlock rejects a negative cap before any request', async () => 
 });
 
 // A server implementing the Idempotency-Key contract plus the unlock ledger.
-function idempotentServer(rows, { loseFirstUnlockResponse }) {
+function idempotentServer(rows, { loseFirstUnlockResponse = false, honoursKey = true } = {}) {
 	const byKey = new Map();
 	const unlocked = new Set();
-	const state = { charged: 0, unlockCalls: 0, previews: 0 };
+	const state = { charged: 0, unlockCalls: 0, previews: 0, resultsCalls: [] };
 	const price = new Map(rows.map((r) => [r.id, Math.round(Number(r.cost) * 1e6)]));
 	const shape = (queryId, extra = {}) => ({
 		queryId,
@@ -202,16 +218,26 @@ function idempotentServer(rows, { loseFirstUnlockResponse }) {
 	const handler = (path, options) => {
 		if (path === '/preview') {
 			state.previews++;
-			const key = options.headers?.['Idempotency-Key'];
+			const key = honoursKey ? options.headers?.['Idempotency-Key'] : undefined;
 			const body = JSON.stringify(options.body);
 			if (key && byKey.has(key)) {
-				if (byKey.get(key).body !== body) throw new Error('IDEMPOTENCY_KEY_REUSED');
-				return shape(byKey.get(key).queryId);
+				if (byKey.get(key).body !== body) throw new Error('422 IDEMPOTENCY_KEY_REUSED');
+				return full(shape(byKey.get(key).queryId), { 'Idempotency-Status': 'replayed' });
 			}
 			const queryId = `q${state.previews}`;
 			if (key) byKey.set(key, { body, queryId });
 			unlocked.clear(); // a fresh queryId has an empty ledger
-			return shape(queryId);
+			return full(shape(queryId), key ? { 'Idempotency-Status': 'created' } : {});
+		}
+		if (path.startsWith('/results/')) {
+			state.resultsCalls.push(options.qs);
+			const body = shape(path.split('/')[2], { latencyMs: 1 });
+			if (options.qs?.includeFigures) {
+				body.results = body.results.map((r) =>
+					r.locked ? r : { ...r, metadata: { figures: [{ image_data: 'base64' }] } },
+				);
+			}
+			return body;
 		}
 		state.unlockCalls++;
 		let delta = 0;
@@ -223,7 +249,7 @@ function idempotentServer(rows, { loseFirstUnlockResponse }) {
 		if (loseFirstUnlockResponse && state.unlockCalls === 1) throw new Error('socket hang up');
 		return shape(options.body.queryId, { costCharged: (delta / 1e6).toFixed(6) });
 	};
-	return { handler, state, byKey };
+	return { handler, state, byKey, unlocked };
 }
 
 test('Retry on Fail after a lost unlock response charges nothing new', async () => {
@@ -233,16 +259,16 @@ test('Retry on Fail after a lost unlock response charges nothing new', async () 
 	const params = sauParams(cap, { maxResults: 3 });
 
 	// Attempt 1: preview, unlock a + b (0.6 of 0.7), then the response is lost.
-	const first = fakeContext({ params, handler: server.handler });
+	const first = fakeContext({ params, handler: server.handler, runIndex: 2 });
 	await assert.rejects(run(first), /socket hang up/);
 	assert.equal(server.state.charged, 600_000);
 
-	// Attempt 2: n8n reruns the node in the same execution.
-	const second = fakeContext({ params, handler: server.handler });
+	// Attempt 2: n8n reruns the node in the same execution, same run index.
+	const second = fakeContext({ params, handler: server.handler, runIndex: 2 });
 	const [items] = await run(second);
 	const keys = [first, second].map((c) => c.calls[0].headers['Idempotency-Key']);
 	assert.equal(keys[0], keys[1], 'same key on retry');
-	assert.match(keys[0], /^n8n:exec-1:node-uuid:0:[0-9a-f]{16}$/);
+	assert.equal(keys[0], 'n8n:exec-1:node-uuid:0:2');
 	assert.equal(second.calls.length, 1, 'the replay makes no unlock call');
 	assert.deepEqual(
 		items.map((i) => i.json.id),
@@ -252,36 +278,169 @@ test('Retry on Fail after a lost unlock response charges nothing new', async () 
 	assert.ok(server.state.charged <= cap * 1e6, `charged ${server.state.charged}`);
 });
 
-test('without an idempotent server a retry could buy twice, which the key prevents', async () => {
-	// Control: the same flow against a server that ignores the header.
-	const rows = [row('a', '0.300000'), row('b', '0.300000')];
-	const server = idempotentServer(rows, { loseFirstUnlockResponse: true });
-	const ignoring = (path, options) => server.handler(path, { ...options, headers: undefined });
-	const params = sauParams(0.7);
-	await assert.rejects(run(fakeContext({ params, handler: ignoring })), /socket hang up/);
-	await run(fakeContext({ params, handler: ignoring }));
-	assert.equal(
-		server.state.charged,
-		1_200_000,
-		'the documented limit when the server lacks the feature',
-	);
+test('no Idempotency-Status on the preview: no purchase, and an error', async () => {
+	const rows = [row('a', '0.300000')];
+	const server = idempotentServer(rows, { honoursKey: false });
+	const ctx = fakeContext({ params: sauParams(1), handler: server.handler });
+	await assert.rejects(run(ctx), /no retry protection.*no purchase was made/);
+	assert.equal(server.state.unlockCalls, 0);
+	assert.equal(server.state.charged, 0);
+	// An unknown status value is no better than none.
+	const odd = fakeContext({
+		params: sauParams(1),
+		handler: () =>
+			full(
+				{ queryId: 'q', costToUnlockRemaining: '0', results: rows },
+				{ 'Idempotency-Status': 'ignored' },
+			),
+	});
+	await assert.rejects(run(odd), /no retry protection/);
+	assert.equal(odd.calls.length, 1);
 });
 
-test('distinct searches in one execution get distinct keys; no key without an execution id', async () => {
+test('Idempotency-Status created and replayed both allow buying', async () => {
+	for (const status of ['created', 'replayed', 'Created']) {
+		const ctx = fakeContext({
+			params: sauParams(1, { maxResults: 1 }),
+			previewHeaders: { 'Idempotency-Status': status },
+			handler: (path) => ({
+				queryId: 'q',
+				costToUnlockRemaining: '0.1',
+				costCharged: path === '/unlock' ? '0.100000' : null,
+				results: [row('a', '0.100000', path !== '/unlock')],
+			}),
+		});
+		const [items] = await run(ctx);
+		assert.equal(ctx.calls[1].url.endsWith('/unlock'), true, status);
+		assert.equal(items[0].json.id, 'a');
+	}
+});
+
+test('nothing to buy needs no retry protection', async () => {
+	const ctx = fakeContext({
+		params: sauParams(0),
+		previewHeaders: {},
+		handler: () => ({ queryId: 'q', costToUnlockRemaining: '0.5', results: [row('a', '0.5')] }),
+	});
+	const [items] = await run(ctx);
+	assert.equal(ctx.calls.length, 1);
+	assert.deepEqual(items[0].json.runSummary.deliveredIds, []);
+});
+
+test('regular node: the key ignores a re-evaluated body and changes per run', async () => {
 	const handler = () => ({ queryId: 'q', costToUnlockRemaining: '0', results: [] });
-	const a = fakeContext({ params: sauParams(0, { query: 'first' }), handler });
-	const b = fakeContext({ params: sauParams(0, { query: 'second' }), handler });
+	// Retry on Fail re-evaluates `{{ $now }}` in the query: same run index, same key.
+	const a = fakeContext({
+		params: sauParams(0, { query: 'news at 10:00:00' }),
+		handler,
+		runIndex: 0,
+	});
+	const b = fakeContext({
+		params: sauParams(0, { query: 'news at 10:00:01' }),
+		handler,
+		runIndex: 0,
+	});
 	await run(a);
 	await run(b);
-	assert.notEqual(a.calls[0].headers['Idempotency-Key'], b.calls[0].headers['Idempotency-Key']);
-	const items = [{ json: {} }, { json: {} }];
-	const two = fakeContext({ params: sauParams(0), handler, items });
+	assert.equal(a.calls[0].headers['Idempotency-Key'], 'n8n:exec-1:node-uuid:0:0');
+	assert.equal(a.calls[0].headers['Idempotency-Key'], b.calls[0].headers['Idempotency-Key']);
+	// A loop iteration is a new run.
+	const loop = fakeContext({ params: sauParams(0), handler, runIndex: 1 });
+	await run(loop);
+	assert.equal(loop.calls[0].headers['Idempotency-Key'], 'n8n:exec-1:node-uuid:0:1');
+	// Two items in one run differ by item index.
+	const two = fakeContext({ params: sauParams(0), handler, items: [{ json: {} }, { json: {} }] });
 	await run(two);
 	assert.notEqual(two.calls[0].headers['Idempotency-Key'], two.calls[1].headers['Idempotency-Key']);
+	// No execution id, no key.
 	const none = fakeContext({ params: sauParams(0), handler, executionId: '' });
 	await run(none);
 	assert.equal(none.calls[0].headers, undefined);
-	assert.ok(a.calls[0].headers['Idempotency-Key'].length <= 255);
+});
+
+test('regular node: a retry whose body changed is refused by the server, never bought twice', async () => {
+	const rows = [row('a', '0.300000')];
+	const server = idempotentServer(rows, { loseFirstUnlockResponse: true });
+	const first = fakeContext({
+		params: sauParams(1, { query: 'news at 10:00:00' }),
+		handler: server.handler,
+	});
+	await assert.rejects(run(first), /socket hang up/);
+	const retry = fakeContext({
+		params: sauParams(1, { query: 'news at 10:00:01' }),
+		handler: server.handler,
+	});
+	await assert.rejects(run(retry), /IDEMPOTENCY_KEY_REUSED/);
+	assert.equal(server.state.charged, 300_000);
+});
+
+test('AI tool: the key fingerprints the body canonically and ignores run index', async () => {
+	const handler = () => ({ queryId: 'q', costToUnlockRemaining: '0', results: [] });
+	const tool = (filters, runIndex, query = 'q') =>
+		fakeContext({
+			type: TOOL_TYPE,
+			params: sauParams(0, { query, searchOptions: { filters } }),
+			rawParams: {},
+			handler,
+			runIndex,
+		});
+	const a = tool({ journal: 'Nature', and: [{ field: 'x', gte: 1, lte: 2 }] }, 0);
+	const b = tool('{"and":[{"lte":2,"gte":1,"field":"x"}],"journal":"Nature"}', 3);
+	const c = tool({ journal: 'Nature' }, 0, 'another question');
+	for (const ctx of [a, b, c]) await run(ctx);
+	const [ka, kb, kc] = [a, b, c].map((ctx) => ctx.calls[0].headers['Idempotency-Key']);
+	assert.match(ka, /^n8n:exec-1:node-uuid:0:[0-9a-f]{16}$/);
+	assert.equal(ka, kb, 'reordered filter keys and a new run index give the same key');
+	assert.notEqual(ka, kc, 'a different search gives a different key');
+	assert.ok(ka.length <= 255);
+});
+
+test('prior spend is charged first: Astra case buys nothing on the second attempt', async () => {
+	// A=$0.60 ranks above B=$0.40.
+	const rows = [row('A', '0.600000'), row('B', '0.400000')];
+	const server = idempotentServer(rows);
+	const attempt1 = fakeContext({
+		params: sauParams(0.5, { maxResults: 2 }),
+		handler: server.handler,
+	});
+	await run(attempt1);
+	assert.deepEqual([...server.unlocked], ['B']);
+	assert.equal(server.state.charged, 400_000);
+	// Same key, cap raised to $0.70, Max Results 1: buying A would total $1.00.
+	const attempt2 = fakeContext({
+		params: sauParams(0.7, { maxResults: 1 }),
+		handler: server.handler,
+	});
+	const [items] = await run(attempt2);
+	assert.equal(server.state.unlockCalls, 1, 'no second unlock');
+	assert.ok(server.state.charged <= 700_000);
+	assert.deepEqual(
+		items.map((i) => i.json.id),
+		['B'],
+	);
+	assert.equal(items[0].json.runSummary.alreadyUnlockedCost, '0.400000');
+});
+
+test('Include Figures on a replay with nothing to buy fetches figures from Get Results', async () => {
+	const rows = [row('a', '0.100000')];
+	const server = idempotentServer(rows);
+	const params = sauParams(1, { maxResults: 1, deliveryOptions: { includeFigures: true } });
+	await run(fakeContext({ params, handler: server.handler }));
+	const replay = fakeContext({ params, handler: server.handler });
+	const [items] = await run(replay);
+	assert.equal(server.state.unlockCalls, 1);
+	assert.deepEqual(server.state.resultsCalls, [{ includeFigures: true }]);
+	assert.equal(replay.calls[1].url, 'https://api.redpine.ai/api/v1/search/results/q1');
+	assert.deepEqual(items[0].json.metadata, { figures: [{ image_data: 'base64' }] });
+	assert.equal(
+		items[0].json.costToUnlockRemaining,
+		'0',
+		'response fields still come from the preview',
+	);
+	// Without Include Figures there is no extra call.
+	const plain = fakeContext({ params: sauParams(1, { maxResults: 1 }), handler: server.handler });
+	await run(plain);
+	assert.equal(plain.calls.length, 1);
 });
 
 test('Preview does not send an idempotency key', async () => {

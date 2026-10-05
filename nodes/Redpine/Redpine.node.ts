@@ -316,7 +316,7 @@ export class Redpine implements INodeType {
 				required: true,
 				default: [],
 				description:
-					'Collections to search, 1 to 5; as an expression, e.g. {{ ["redpine-science"] }}. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+					'Collections to search, 1 to 5; as an expression, e.g. {{ ["Redpine Science"] }}. Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
 				displayOptions: {
 					show: { resource: ['search'], operation: ['preview', 'searchAndUnlock'] },
 				},
@@ -339,7 +339,7 @@ export class Redpine implements INodeType {
 				typeOptions: { minValue: 0, numberPrecision: 6 },
 				default: 0,
 				description:
-					'Most this node may charge per input item, in US dollars, retries included. Results that would go over the cap are skipped; at 0 nothing is bought. As an AI tool this must be a fixed number, not an expression.',
+					'Most this node may charge per input item, in US dollars, retries included. Results are bought in relevance order until the next one would go over the cap; at 0 nothing is bought. As an AI tool this must be a fixed number, not an expression.',
 				displayOptions: { show: { resource: ['search'], operation: ['searchAndUnlock'] } },
 			},
 			{

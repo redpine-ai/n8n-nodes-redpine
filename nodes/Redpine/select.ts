@@ -11,7 +11,7 @@ export interface PreviewRow {
 	cost?: string | null;
 }
 
-export type SkipReason = 'maxResults' | 'unknownCost' | 'overBudget';
+export type SkipReason = 'maxResults' | 'unknownCost' | 'overBudget' | 'belowSkipped';
 
 export interface Selection {
 	/** Ids to deliver, in relevance order: already unlocked plus newly bought. */
@@ -89,9 +89,13 @@ function quoteMicros(row: PreviewRow): number | null {
  * Then, in relevance order, up to maxResults rows are kept:
  * - an already-unlocked row is delivered;
  * - a locked row with a known quote is bought if it fits in what is left of
- *   the budget; one that does not fit is skipped and the walk continues, so a
- *   cheaper, lower-ranked row can still fit;
- * - a locked row with no usable quote is skipped: null means unknown, not free.
+ *   the budget;
+ * - a locked row with no usable quote is skipped: null means unknown, not free;
+ * - once a locked row is skipped for either reason, no lower-ranked row is
+ *   bought ('belowSkipped'). Buying stops rather than walking down to a
+ *   cheaper, less relevant result, so the node never buys a worse result in
+ *   place of a better one it could not afford. Already-unlocked rows below it
+ *   are still delivered: they cost nothing now.
  *
  * Guarantee: when anything is bought, the prior rows' quotes plus the new
  * rows' quotes, each plus one microdollar, total at most maxCostMicros, and
@@ -113,6 +117,7 @@ export function selectWithinBudget(
 		priorUnknown: false,
 	};
 	let committed = 0;
+	let stopped = false;
 	for (const row of rows) {
 		if (row.locked) continue;
 		const cost = quoteMicros(row);
@@ -131,13 +136,19 @@ export function selectWithinBudget(
 			selection.keep.push(row.id);
 			continue;
 		}
+		if (stopped) {
+			selection.skipped.push({ id: row.id, reason: 'belowSkipped' });
+			continue;
+		}
 		const cost = quoteMicros(row);
 		if (cost === null) {
 			selection.skipped.push({ id: row.id, reason: 'unknownCost' });
+			stopped = true;
 			continue;
 		}
 		if (selection.priorUnknown || committed + cost + 1 > maxCostMicros) {
 			selection.skipped.push({ id: row.id, reason: 'overBudget' });
+			stopped = true;
 			continue;
 		}
 		selection.keep.push(row.id);

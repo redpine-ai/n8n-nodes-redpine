@@ -153,19 +153,19 @@ test('Search and Unlock skips the unlock call when nothing needs buying', async 
 	assert.equal(items[0].json.runSummary.costCharged, '0');
 	assert.deepEqual(
 		items[0].json.runSummary.skipped.map((s) => s.reason),
-		['overBudget', 'overBudget'],
+		['overBudget', 'belowSkipped'],
 	);
 });
 
 test('Search and Unlock unlocks only the kept locked ids', async () => {
 	const ctx = fakeContext({
-		params: sauParams(1),
+		params: sauParams(1, { maxResults: 4 }),
 		handler: (path) =>
 			path === '/preview'
 				? {
 						queryId: 'q2',
 						costToUnlockRemaining: '0.4',
-						results: [row('a', '0.1'), row('b', null), row('c', '0.2'), row('d', '0.1')],
+						results: [row('a', '0.1'), row('b', '0.2'), row('c', '5.0'), row('d', '0.1')],
 					}
 				: {
 						queryId: 'q2',
@@ -173,8 +173,8 @@ test('Search and Unlock unlocks only the kept locked ids', async () => {
 						costCharged: '0.300000',
 						results: [
 							row('a', '0.1', false),
-							row('b', null),
-							row('c', '0.2', false),
+							row('b', '0.2', false),
+							row('c', '5.0'),
 							row('d', '0.1'),
 						],
 					},
@@ -183,12 +183,17 @@ test('Search and Unlock unlocks only the kept locked ids', async () => {
 	assert.equal(ctx.calls.length, 2);
 	assert.deepEqual(ctx.calls[1].body, {
 		queryId: 'q2',
-		resultIds: ['a', 'c'],
+		resultIds: ['a', 'b'],
 		includeFigures: false,
 	});
 	assert.deepEqual(
 		items.map((i) => i.json.id),
-		['a', 'c'],
+		['a', 'b'],
+	);
+	assert.deepEqual(
+		items[0].json.runSummary.skipped.map((s) => s.reason),
+		['overBudget', 'belowSkipped'],
+		'c does not fit, so d (ranked below it) is not bought either',
 	);
 	assert.equal(items[0].json.runSummary.costCharged, '0.300000');
 	assert.equal(items[0].json.runSummary.quotedCost, '0.300000');
@@ -404,7 +409,11 @@ test('prior spend is charged first: Astra case buys nothing on the second attemp
 		handler: server.handler,
 	});
 	await run(attempt1);
-	assert.deepEqual([...server.unlocked], ['B']);
+	// A, the better result, does not fit $0.50, so buying stops: B is not bought in its place.
+	assert.deepEqual([...server.unlocked], []);
+	assert.equal(server.state.charged, 0);
+	// B is then bought by an explicit Unlock under the same queryId.
+	server.handler('/unlock', { body: { queryId: 'q1', resultIds: ['B'] } });
 	assert.equal(server.state.charged, 400_000);
 	// Same key, cap raised to $0.70, Max Results 1: buying A would total $1.00.
 	const attempt2 = fakeContext({

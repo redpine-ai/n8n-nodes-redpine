@@ -39,7 +39,7 @@ All operations are under the **Search** resource.
 Runs a search and returns every result as a teaser, with the price to unlock each one. It never charges, and works at a zero balance.
 
 - **Query**: what to search for.
-- **Collection Names or IDs**: required, 1 to 5 collections. Pick them from the list, which shows the collections your key can search, or give names with an expression, for example `{{ ["redpine-science"] }}`. There is no default collection; an empty selection is refused before any request.
+- **Collection Names or IDs**: required, 1 to 5 collections. Pick them from the list, which shows the collections your key can search, or give names with an expression, for example `{{ ["Redpine Science"] }}`. There is no default collection; an empty selection is refused before any request.
 - **Options**
   - **Filters (JSON)**: metadata filters, passed to the API unchanged, for example `{"journal": "Nature"}` or `{"and": [{"field": "publication_date", "gte": "2020-01-01"}]}`. See the [API docs](https://docs.redpine.ai) for the fields and operators.
   - **Number of Results**: 1 to 30, default 10.
@@ -71,8 +71,9 @@ The unattended path: preview, then buy the best results that fit within a cost c
 How results are chosen:
 
 1. Results that are already unlocked under this search (see Retries) were paid for earlier. All of their prices are counted against Max Cost first, whatever their rank and whether or not they are delivered. If any of them has no usable price, nothing is bought.
-2. Then, in relevance order, up to Max Results are kept. An already-unlocked result is delivered. A locked result with a known price is bought if it fits in what is left of Max Cost; one that would go over is skipped and the walk continues, so a cheaper result further down can still fit.
-3. Locked results with an unknown (`null`) price are skipped. Unknown does not mean free.
+2. Then, in relevance order, up to Max Results are kept. An already-unlocked result is delivered. A locked result with a known price is bought if it fits in what is left of Max Cost.
+3. A locked result with an unknown (`null`) price is skipped; unknown does not mean free.
+4. Buying stops at the first locked result that is skipped, for either reason. The node never walks further down the list to a cheaper, less relevant result, so it never buys a worse result in place of a better one it could not afford. Results ranked below are reported as `belowSkipped`; already-unlocked ones are still delivered.
 
 The node then unlocks only the chosen locked results. If there are none, it makes no unlock call; with **Include Figures** on, it fetches the delivered results' figures from Get Results instead, which is free.
 

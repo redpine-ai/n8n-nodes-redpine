@@ -58,21 +58,38 @@ test('$0 quotes get the rounding allowance too', () => {
 	assert.deepEqual(selectWithinBudget(zeros, 10, 3).toUnlock, ['a', 'b', 'c']);
 });
 
-test('continues past an over-budget row to a cheaper one', () => {
+test('stops buying at the first over-budget row instead of walking to a cheaper one', () => {
 	const rows = [row('big', '5.000000'), row('small', '0.010000')];
 	const sel = selectWithinBudget(rows, 10, usd('1'));
-	assert.deepEqual(sel.keep, ['small']);
-	assert.deepEqual(sel.skipped, [{ id: 'big', reason: 'overBudget' }]);
+	assert.deepEqual(sel.keep, []);
+	assert.deepEqual(sel.skipped, [
+		{ id: 'big', reason: 'overBudget' },
+		{ id: 'small', reason: 'belowSkipped' },
+	]);
+});
+
+test('already-unlocked rows below a skipped row are still delivered', () => {
+	const rows = [row('big', '5.000000'), row('prior', '0.100000', false), row('small', '0.010000')];
+	const sel = selectWithinBudget(rows, 10, usd('1'));
+	assert.deepEqual(sel.keep, ['prior']);
+	assert.deepEqual(sel.toUnlock, []);
+	assert.deepEqual(
+		sel.skipped.map((s) => s.reason),
+		['overBudget', 'belowSkipped'],
+	);
 });
 
 test('skips locked rows with a null or missing cost', () => {
 	const rows = [row('unknown', null), { id: 'missing', locked: true }, row('priced', '0.01')];
 	const sel = selectWithinBudget(rows, 10, usd('1'));
-	assert.deepEqual(sel.keep, ['priced']);
+	assert.deepEqual(sel.keep, [], 'nothing ranked below an unpriced row is bought');
 	assert.deepEqual(sel.skipped, [
 		{ id: 'unknown', reason: 'unknownCost' },
-		{ id: 'missing', reason: 'unknownCost' },
+		{ id: 'missing', reason: 'belowSkipped' },
+		{ id: 'priced', reason: 'belowSkipped' },
 	]);
+	const missingFirst = selectWithinBudget([{ id: 'missing', locked: true }, row('p', '0.01')], 10, usd('1'));
+	assert.deepEqual(missingFirst.skipped[0], { id: 'missing', reason: 'unknownCost' });
 });
 
 test('already-unlocked rows are delivered and count against the budget', () => {
@@ -175,9 +192,10 @@ test('property: an idempotent replay selects the same ids and buys nothing new',
 });
 
 test('Astra case: prior spend is charged before any purchase, whatever its rank', () => {
-	// A=$0.60 ranks above B=$0.40. Attempt 1 at $0.50 bought B.
+	// A=$0.60 ranks above B=$0.40. At $0.50 A does not fit, so nothing is bought
+	// (B is not bought in A's place); suppose B was then bought by an explicit Unlock.
 	const first = selectWithinBudget([row('A', '0.600000'), row('B', '0.400000')], 2, usd('0.5'));
-	assert.deepEqual(first.toUnlock, ['B']);
+	assert.deepEqual(first.toUnlock, []);
 	// Attempt 2 at $0.70 and Max Results 1: buying A would total $1.00.
 	const second = selectWithinBudget(
 		[row('A', '0.600000'), row('B', '0.400000', false)],
@@ -214,6 +232,9 @@ test('prior spend includes unlocked rows that are not delivered', () => {
 
 test('a locked row with an unparseable quote is skipped, not fatal', () => {
 	const sel = selectWithinBudget([row('bad', '1.2.3'), row('ok', '0.1')], 10, usd('1'));
-	assert.deepEqual(sel.skipped, [{ id: 'bad', reason: 'unknownCost' }]);
-	assert.deepEqual(sel.toUnlock, ['ok']);
+	assert.deepEqual(sel.skipped, [
+		{ id: 'bad', reason: 'unknownCost' },
+		{ id: 'ok', reason: 'belowSkipped' },
+	]);
+	assert.deepEqual(sel.toUnlock, []);
 });

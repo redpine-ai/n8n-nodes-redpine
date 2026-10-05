@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Search and Unlock buys in relevance order and stops at the first result it cannot buy, instead of skipping down to a cheaper, less relevant one. Results below are reported as `belowSkipped`.
+- The collection example uses the name the dropdown shows, `Redpine Science`.
+
 ## 0.1.1
 
 - Search and Unlock buys only when the API confirms retry protection (`Idempotency-Status: created` or `replayed` on the preview); otherwise it fails without buying.

@@ -6,3 +6,5 @@ node_modules
 AGENTS.md
 CLAUDE.md
 .vscode/
+
+/worktrees/

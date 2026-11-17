@@ -1,0 +1,27 @@
+# Dependabot policy: SECURITY UPDATES ONLY, the same policy as the connect-* repos.
+#
+# `open-pull-requests-limit: 0` switches off scheduled *version* updates for the
+# ecosystem. Security updates are exempt from that limit, so Dependabot still
+# opens a PR for every open Dependabot alert with a patch.
+#
+# `labels` applies to security-update PRs too: `pr-type-label` is a required
+# check and Dependabot applies no `type:` label of its own. Every manifest
+# directory needs an entry here even though version updates are off.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    labels: ["type:security", "dependencies"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    labels: ["type:security", "dependencies"]

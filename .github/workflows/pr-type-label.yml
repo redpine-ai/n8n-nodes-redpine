@@ -1,0 +1,66 @@
+# Canonical source: redpine-ai/redpine-cc-plugin
+#   plugins/redpine-eng/skills/redpine-pr-standard/assets/pr-type-label.yml
+# Re-sync with: scripts/sync-pr-standard.sh
+#
+# SOC2 change-management control. `pr-type-label` is a REQUIRED status check on
+# main in every Redpine repo. Never add a paths or paths-ignore filter to this
+# workflow, and never let a CI-scoping script skip it: a required check that does
+# not run leaves every PR unmergeable forever.
+name: PR type label
+
+# pull_request_target, not pull_request: GitHub then runs THIS file as it is on the
+# default branch, so a PR cannot edit the check into passing. That is only safe
+# because the job never checks out or runs PR code: it reads the labels from the
+# event payload and nothing else. Keep it that way.
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] no checkout, no PR code; labels from the event only
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled, ready_for_review]
+
+# No token scopes at all: the labels arrive in the event payload.
+permissions: {}
+
+concurrency:
+  group: pr-type-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Job name is the required-status-check context. Do not rename it.
+  pr-type-label:
+    name: pr-type-label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require exactly one type label
+        env:
+          # Read through env, never interpolated into the shell, so a label
+          # containing shell metacharacters cannot inject into this script.
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          ALLOWED="type:feature type:bugfix type:hotfix type:chore type:docs type:security"
+
+          types=$(printf '%s' "$PR_LABELS" | jq -r '.[] | select(startswith("type:"))')
+          count=$(printf '%s' "$types" | grep -c . || true)
+
+          if [ "$count" -eq 0 ]; then
+            echo "::error::This PR has no type label. Add exactly one of: $ALLOWED"
+            exit 1
+          fi
+
+          if [ "$count" -gt 1 ]; then
+            echo "::error::This PR has $count type labels ($(printf '%s' "$types" | tr '\n' ' ')). Exactly one is allowed."
+            exit 1
+          fi
+
+          # Exact match against each allowed value. A substring test would accept a
+          # single label literally named "type:feature type:bugfix".
+          ok=0
+          for a in $ALLOWED; do
+            if [ "$types" = "$a" ]; then ok=1; break; fi
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::'$types' is not a valid type label. Use one of: $ALLOWED"
+            exit 1
+          fi
+
+          echo "OK: $types"
